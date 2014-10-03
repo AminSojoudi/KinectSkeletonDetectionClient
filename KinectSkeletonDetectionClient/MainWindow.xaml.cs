@@ -15,6 +15,8 @@ using System.Windows.Shapes;
 using Microsoft.Kinect;
 using System.IO;
 using System.ComponentModel;
+using Newtonsoft.Json;
+using System.Diagnostics;
 
 namespace KinectSkeletonDetectionClient
 {
@@ -125,6 +127,20 @@ namespace KinectSkeletonDetectionClient
         /// </summary>
         private float HipCenterJointRotation;
 
+        /// <summary>
+        /// Current user id
+        /// </summary>
+        private string CurrentUserID;
+
+        /// <summary>
+        /// timer for users
+        /// </summary>
+        private Stopwatch stop;
+        /// <summary>
+        /// Object that handles data transfer to kafka server
+        /// </summary>
+        private KafkaSender kafkaSender;
+
 
         public MainWindow()
         {
@@ -134,6 +150,14 @@ namespace KinectSkeletonDetectionClient
 
         private void OnWindowLoaded(object sender, RoutedEventArgs e)
         {
+            // Create the Stop Watch
+            stop = Stopwatch.StartNew();
+
+            // instantiate kafka sender class
+            kafkaSender = new KafkaSender();
+
+            NewUser("amin");
+
             // Create the drawing group we'll use for drawing
             this.mainDrawingGroup = new DrawingGroup();
             this.secondDrawingGroup = new DrawingGroup();
@@ -228,11 +252,22 @@ namespace KinectSkeletonDetectionClient
         /// <param name="drawingContext">drawing context to draw to</param>
         private void DrawBonesAndJoints(Skeleton skeleton, DrawingContext drawingContext)
         {
+            foreach (Joint joint in skeleton.Joints)
+            {
+                FrameData FD = new FrameData(CurrentUserID);
+                FD.AddJoint(new MyJoint(joint.JointType.ToString(), new Transform(joint.Position.X, joint.Position.Y, joint.Position.Z)));
+                FD.Time = stop.ElapsedMilliseconds.ToString();
+                string messageJson = JsonConvert.SerializeObject(FD);
+                JsonData.Content = messageJson;
+                //send data to kafka server
+                kafkaSender.sendMessage(messageJson);
+            }
+
             CoordinateBase = skeleton.Joints[JointType.HipCenter].Position;
             HipLeft = skeleton.Joints[JointType.HipLeft].Position;
             HipRight = skeleton.Joints[JointType.HipRight].Position;
 
-            HipCenterJointRotation = skeleton.BoneOrientations[JointType.Spine].AbsoluteRotation.Quaternion.W;
+            HipCenterJointRotation = skeleton.BoneOrientations[JointType.HipCenter].HierarchicalRotation.Quaternion.W;
             HipCenter = this.sensor.CoordinateMapper.MapSkeletonPointToDepthPoint(skeleton.Joints[JointType.HipCenter].Position, DepthImageFormat.Resolution640x480Fps30);
 
             // Render Torso
@@ -344,8 +379,8 @@ namespace KinectSkeletonDetectionClient
         {
 
             double q = HipCenterJointRotation;
-            q = (double)(q * Math.PI * 50)/(double) 45;
-            float a = (HipRight.X - CoordinateBase.X + HipLeft.X - CoordinateBase.X) * 0.5f;
+            q = 2 * Math.Acos(q);
+            //float a = (HipRight.X - CoordinateBase.X + HipLeft.X - CoordinateBase.X) * 0.5f;
             ScaleLabel.Content = q.ToString();
             SkeletonPoint sp = new SkeletonPoint();
             // Transform to HipCenter position
@@ -359,6 +394,17 @@ namespace KinectSkeletonDetectionClient
             sp.Z = sp.Z * (float)Math.Cos(q) - sp.X * (float)Math.Sin(q);
             sp.Y = sp.Y;
             return sp;
+        }
+
+
+        private Vector4 Conjugate(Vector4 q)
+        {
+            Vector4 vec = new Vector4();
+            vec.X = -q.X;
+            vec.Y = -q.Y;
+            vec.Z = -q.Z;
+            vec.W = q.W;
+            return vec;
         }
 
         private Point MapSkeletonPoint(SkeletonPoint spoint , float ViewPortWidth , float ViewPortHeight)
@@ -385,6 +431,12 @@ namespace KinectSkeletonDetectionClient
             Slider slider = sender as Slider;
             Scale = slider.Value;
             ScaleLabel.Content = Scale.ToString();
+        }
+
+        public void NewUser(string userID)
+        {
+            stop.Restart();
+            CurrentUserID = userID;
         }
     }
 }
