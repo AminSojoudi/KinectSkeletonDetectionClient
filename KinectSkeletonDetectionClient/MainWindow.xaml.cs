@@ -17,6 +17,7 @@ using System.IO;
 using System.ComponentModel;
 using Newtonsoft.Json;
 using System.Diagnostics;
+using System.Threading;
 
 namespace KinectSkeletonDetectionClient
 {
@@ -25,6 +26,11 @@ namespace KinectSkeletonDetectionClient
     /// </summary>
     public partial class MainWindow : Window
     {
+        /// <summary>
+        /// random generator
+        /// </summary>
+        static Random randomGen = new Random();
+
         /// <summary>
         /// Width of output drawing
         /// </summary>
@@ -141,6 +147,40 @@ namespace KinectSkeletonDetectionClient
         /// </summary>
         private KafkaSender kafkaSender;
 
+        /// <summary>
+        /// Current Frame Data
+        /// </summary>
+        private FrameData currentFrameData;
+
+        /// <summary>
+        /// boolean to define is kinect recoding current skeleton data
+        /// </summary>
+        private bool isRecording;
+        /// <summary>
+        /// collection to store temp skeleton data and save it on disk
+        /// </summary>
+        private List<FrameData> skeletonCollection;
+        /// <summary>
+        /// is sample data is on then program will not connet to kafka sender and it can playback sample data
+        /// </summary>
+        private bool isSampleData = true;
+        /// <summary>
+        /// is playing sample data
+        /// </summary>
+        private bool isPlayingSampleData = false;
+        /// <summary>
+        /// stop replay loop
+        /// </summary>
+        private bool stopReplayLoop;
+        /// <summary>
+        /// can send data to kafka server
+        /// </summary>
+        private bool canSendData = false;
+        /// <summary>
+        /// is client connected to kafka server
+        /// </summary>
+        private bool connectedToServer;
+
 
         public MainWindow()
         {
@@ -153,10 +193,14 @@ namespace KinectSkeletonDetectionClient
             // Create the Stop Watch
             stop = Stopwatch.StartNew();
 
-            // instantiate kafka sender class
-            kafkaSender = new KafkaSender();
 
-            NewUser("amin");
+            NewUser();
+
+            isRecording = false;
+
+            skeletonCollection = new List<FrameData>();
+
+            currentFrameData = new FrameData(CurrentUserID);
 
             // Create the drawing group we'll use for drawing
             this.mainDrawingGroup = new DrawingGroup();
@@ -172,9 +216,10 @@ namespace KinectSkeletonDetectionClient
 
 
             this.sensor = KinectSensor.KinectSensors.Where(item => item.Status == KinectStatus.Connected).FirstOrDefault();
+            if (this.sensor != null)
+            {
             if (!this.sensor.SkeletonStream.IsEnabled)
             {
-
                 TransformSmoothParameters smoothingParam = new TransformSmoothParameters();
                 {
                     smoothingParam.Smoothing = 0.5f;
@@ -184,27 +229,33 @@ namespace KinectSkeletonDetectionClient
                     smoothingParam.MaxDeviationRadius = 0.1f;
                 };
                 this.sensor.SkeletonStream.Enable(smoothingParam);
+               // this.sensor.SkeletonStream.Enable();
                 this.sensor.SkeletonFrameReady += sensor_SkeletonFrameReady;
-            }
+                }
 
-            // Start the sensor!
-            try
-            {
-                this.sensor.Start();
+                // Start the sensor!
+                try
+                {
+                    this.sensor.Start();
+                    if (this.sensor.ElevationAngle != 0)
+                    {
+                        this.sensor.ElevationAngle = 0;
+                    }
+                    StatusBar.Content = "Kinect loaded sucessfully";
+                    Scale = 0.4f;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.ToString());
+                    this.sensor = null;
+                    isSampleData = true;
+                }
             }
-            catch (IOException)
-            {
-                this.sensor = null;
-            }
-            if (this.sensor == null)
+            else if (this.sensor == null)
             {
                 StatusBar.Content = "Kinect not loaded";
-            }
-            else
-            {
-                StatusBar.Content = "Kinect loaded sucessfully";
-            }
-           
+                isSampleData = true;
+            }  
         }
 
         private void sensor_SkeletonFrameReady(object sender, SkeletonFrameReadyEventArgs e)
@@ -222,22 +273,22 @@ namespace KinectSkeletonDetectionClient
                                           select trackSkeleton).FirstOrDefault();
                 if (firstSkeleton == null)
                 {
-                    StatusBar.Content = "Sekeleton Lost!!";
                     return;
                 }
 
-                StatusBar.Content = "Skeleton Found , trying to find a loop in walking";
-
-                using (DrawingContext dc = this.mainDrawingGroup.Open())
+                if (!isPlayingSampleData)
                 {
-                    // Draw a transparent background to set the render size
-                    dc.DrawRectangle(Brushes.Black, null, new Rect(0.0, 0.0, RenderWidth, RenderHeight));
+                    using (DrawingContext dc = this.mainDrawingGroup.Open())
+                    {
+                        // Draw a transparent background to set the render size
+                        dc.DrawRectangle(Brushes.Black, null, new Rect(0.0, 0.0, RenderWidth, RenderHeight));
 
-                    this.DrawBonesAndJoints(firstSkeleton, dc);
+                        this.DrawBonesAndJoints(firstSkeleton, dc);
 
-                    // prevent drawing outside of our render area
-                    this.mainDrawingGroup.ClipGeometry = new RectangleGeometry(new Rect(0.0, 0.0, RenderWidth, RenderHeight));
+                        // prevent drawing outside of our render area
+                        this.mainDrawingGroup.ClipGeometry = new RectangleGeometry(new Rect(0.0, 0.0, RenderWidth, RenderHeight));
 
+                    }
                 }
             }
         }
@@ -252,23 +303,32 @@ namespace KinectSkeletonDetectionClient
         /// <param name="drawingContext">drawing context to draw to</param>
         private void DrawBonesAndJoints(Skeleton skeleton, DrawingContext drawingContext)
         {
+
+
+
+            currentFrameData = new FrameData(CurrentUserID);
+            currentFrameData.Time = stop.ElapsedMilliseconds.ToString();
             foreach (Joint joint in skeleton.Joints)
             {
-                FrameData FD = new FrameData(CurrentUserID);
-                FD.AddJoint(new MyJoint(joint.JointType.ToString(), new Transform(joint.Position.X, joint.Position.Y, joint.Position.Z)));
-                FD.Time = stop.ElapsedMilliseconds.ToString();
-                string messageJson = JsonConvert.SerializeObject(FD);
-                JsonData.Content = messageJson;
+                currentFrameData.AddJoint(new MyJoint(joint.JointType.ToString(), new Transform(joint.Position.X, joint.Position.Y, joint.Position.Z)));
+            }
+
+            if (canSendData)
+            {
                 //send data to kafka server
+                string messageJson = JsonConvert.SerializeObject(currentFrameData);
                 kafkaSender.sendMessage(messageJson);
+            }
+            // record
+            if (isRecording == true)
+            {
+                skeletonCollection.Add(currentFrameData);
             }
 
             CoordinateBase = skeleton.Joints[JointType.HipCenter].Position;
             HipLeft = skeleton.Joints[JointType.HipLeft].Position;
             HipRight = skeleton.Joints[JointType.HipRight].Position;
-
-            HipCenterJointRotation = skeleton.BoneOrientations[JointType.HipCenter].HierarchicalRotation.Quaternion.W;
-            HipCenter = this.sensor.CoordinateMapper.MapSkeletonPointToDepthPoint(skeleton.Joints[JointType.HipCenter].Position, DepthImageFormat.Resolution640x480Fps30);
+            
 
             // Render Torso
             this.DrawBone(skeleton, drawingContext, JointType.Head, JointType.ShoulderCenter);
@@ -304,7 +364,7 @@ namespace KinectSkeletonDetectionClient
             {
                 Brush drawBrush = null;
 
-                if (joint.TrackingState == JointTrackingState.Tracked)
+                if (joint.TrackingState == JointTrackingState.Tracked || isSampleData)
                 {
                     drawBrush = this.trackedJointBrush;
                 }
@@ -336,7 +396,10 @@ namespace KinectSkeletonDetectionClient
             if (joint0.TrackingState == JointTrackingState.NotTracked ||
                 joint1.TrackingState == JointTrackingState.NotTracked)
             {
-                return;
+                if (!isSampleData)
+                {
+                    return;
+                }
             }
 
             // Don't draw if both points are inferred
@@ -348,12 +411,32 @@ namespace KinectSkeletonDetectionClient
 
             // We assume all drawn bones are inferred unless BOTH joints are tracked
             Pen drawPen = this.inferredBonePen;
-            if (joint0.TrackingState == JointTrackingState.Tracked && joint1.TrackingState == JointTrackingState.Tracked)
+            if (joint0.TrackingState == JointTrackingState.Tracked && joint1.TrackingState == JointTrackingState.Tracked || isSampleData)
             {
                 drawPen = this.trackedBonePen;
             }
 
             drawingContext.DrawLine(drawPen, this.SkeletonPointToScreen(ChangeCoordinate(joint0.Position)), this.SkeletonPointToScreen(ChangeCoordinate(joint1.Position)));
+        }
+
+
+        /// <summary>
+        /// Draws a bone line between two joints
+        /// </summary>
+        /// <param name="frame">frame to draw bones from</param>
+        /// <param name="drawingContext">drawing context to draw to</param>
+        /// <param name="jointType0">joint to start drawing from</param>
+        /// <param name="jointType1">joint to end drawing at</param>
+        private void DrawBone(FrameData frame, DrawingContext drawingContext, JointType jointType0, JointType jointType1)
+        {
+            Transform joint0 = frame.getTransformByJointame(jointType0);
+            Transform joint1 = frame.getTransformByJointame(jointType1); 
+
+            // We assume all drawn bones are inferred unless BOTH joints are tracked
+            Pen drawPen = this.trackedBonePen;
+            
+
+            drawingContext.DrawLine(drawPen, this.SkeletonPointToScreen(ChangeCoordinate(joint0)), this.SkeletonPointToScreen(ChangeCoordinate(joint1)));
         }
 
 
@@ -373,26 +456,37 @@ namespace KinectSkeletonDetectionClient
             
         }
 
+        private Point TransformToScreen(Transform transform)
+        {
+            SkeletonPoint sp = new SkeletonPoint();
+            sp.X = transform.X;
+            sp.Y = transform.Y;
+            sp.Z = transform.Z;
+            Point depthPoint = MapSkeletonPoint(sp, RenderWidth, RenderHeight);
+            return new Point((depthPoint.X) * Scale + RenderWidth * 0.5f, (depthPoint.Y) * Scale + RenderHeight * 0.5f);
+        }
+
 
 
         private SkeletonPoint ChangeCoordinate(SkeletonPoint skelPoint)
         {
-
-            double q = HipCenterJointRotation;
-            q = 2 * Math.Acos(q);
-            //float a = (HipRight.X - CoordinateBase.X + HipLeft.X - CoordinateBase.X) * 0.5f;
-            ScaleLabel.Content = q.ToString();
             SkeletonPoint sp = new SkeletonPoint();
             // Transform to HipCenter position
             sp.X = skelPoint.X - CoordinateBase.X;
             sp.Y = skelPoint.Y - CoordinateBase.Y;
             sp.Z = skelPoint.Z - CoordinateBase.Z;
 
+            return sp;
+        }
 
-            // Rotation based on Y axis
-            sp.X = sp.Z * (float)Math.Sin(q) + sp.X * (float)Math.Cos(q);
-            sp.Z = sp.Z * (float)Math.Cos(q) - sp.X * (float)Math.Sin(q);
-            sp.Y = sp.Y;
+        private SkeletonPoint ChangeCoordinate(Transform transform)
+        {
+            SkeletonPoint sp = new SkeletonPoint();
+            // Transform to HipCenter position
+            sp.X = transform.X - CoordinateBase.X;
+            sp.Y = transform.Y - CoordinateBase.Y;
+            sp.Z = transform.Z - CoordinateBase.Z;
+
             return sp;
         }
 
@@ -430,13 +524,203 @@ namespace KinectSkeletonDetectionClient
         {
             Slider slider = sender as Slider;
             Scale = slider.Value;
-            ScaleLabel.Content = Scale.ToString();
         }
 
+        public void NewUser()
+        {  
+            NewUser(randomGen.Next(1, int.MaxValue).ToString());
+        }
         public void NewUser(string userID)
         {
             stop.Restart();
             CurrentUserID = userID;
+            UserIDLabel.Content = CurrentUserID;
         }
+
+        private void SampleData1_Click(object sender, RoutedEventArgs e)
+        {
+            stopReplayLoop = false;
+            isPlayingSampleData = true;
+            // Read in file with File class.
+            string text1 = File.ReadAllText("Sample1.txt");
+           // List<Skeleton> skeletons = (List<Skeleton>) JsonConvert.DeserializeObject(text1);
+            List<FrameData> frames = JsonConvert.DeserializeObject<List<FrameData>>(text1);
+            replay(frames , 30 , 5);
+            
+            
+
+        }
+
+        private async Task replay(List<FrameData> frames , int initialFrameNumber , int finalPaddingFrames)
+        {
+
+            // looping play back
+            while(true)
+            {
+                for (int i = initialFrameNumber ; i < frames.Count - finalPaddingFrames ; i++)// FrameData item in frames)
+                {
+                    using (DrawingContext dc = this.mainDrawingGroup.Open())
+                    {
+                        // Draw a transparent background to set the render size
+                        dc.DrawRectangle(Brushes.Black, null, new Rect(0.0, 0.0, RenderWidth, RenderHeight));
+
+                        if (stopReplayLoop)
+                        {
+                            return;
+                        }
+
+                        if (canSendData)
+                        {
+                            string messageJson = JsonConvert.SerializeObject(frames[i]);
+                            //send data to kafka server
+                            kafkaSender.sendMessage(messageJson);
+                        }
+
+                        await Task.Delay(35);
+
+                        this.drawBonesAndJointsForReplay(frames[i], dc);
+
+
+                        // prevent drawing outside of our render area
+                        this.mainDrawingGroup.ClipGeometry = new RectangleGeometry(new Rect(0.0, 0.0, RenderWidth, RenderHeight));
+
+                    }
+                }
+                Console.WriteLine("a loop finished");
+                isPlayingSampleData = false;
+            }
+        }
+
+
+        private void drawBonesAndJointsForReplay(FrameData frame, DrawingContext drawingContext)
+        {
+
+            foreach (MyJoint _joint in frame.Joints)
+            {
+                if (_joint.jointName == JointType.HipCenter.ToString())
+                {
+
+                    CoordinateBase.X = _joint.transform.X;
+                    CoordinateBase.Y = _joint.transform.Y;
+                    CoordinateBase.Z = _joint.transform.Z;
+                }
+            }
+
+
+            // Render Torso
+            this.DrawBone(frame, drawingContext, JointType.Head, JointType.ShoulderCenter);
+            this.DrawBone(frame, drawingContext, JointType.ShoulderCenter, JointType.ShoulderLeft);
+            this.DrawBone(frame, drawingContext, JointType.ShoulderCenter, JointType.ShoulderRight);
+            this.DrawBone(frame, drawingContext, JointType.ShoulderCenter, JointType.Spine);
+            this.DrawBone(frame, drawingContext, JointType.Spine, JointType.HipCenter);
+            this.DrawBone(frame, drawingContext, JointType.HipCenter, JointType.HipLeft);
+            this.DrawBone(frame, drawingContext, JointType.HipCenter, JointType.HipRight);
+
+            // Left Arm
+            this.DrawBone(frame, drawingContext, JointType.ShoulderLeft, JointType.ElbowLeft);
+            this.DrawBone(frame, drawingContext, JointType.ElbowLeft, JointType.WristLeft);
+            this.DrawBone(frame, drawingContext, JointType.WristLeft, JointType.HandLeft);
+
+            // Right Arm
+            this.DrawBone(frame, drawingContext, JointType.ShoulderRight, JointType.ElbowRight);
+            this.DrawBone(frame, drawingContext, JointType.ElbowRight, JointType.WristRight);
+            this.DrawBone(frame, drawingContext, JointType.WristRight, JointType.HandRight);
+
+            // Left Leg
+            this.DrawBone(frame, drawingContext, JointType.HipLeft, JointType.KneeLeft);
+            this.DrawBone(frame, drawingContext, JointType.KneeLeft, JointType.AnkleLeft);
+            this.DrawBone(frame, drawingContext, JointType.AnkleLeft, JointType.FootLeft);
+
+            // Right Leg
+            this.DrawBone(frame, drawingContext, JointType.HipRight, JointType.KneeRight);
+            this.DrawBone(frame, drawingContext, JointType.KneeRight, JointType.AnkleRight);
+            this.DrawBone(frame, drawingContext, JointType.AnkleRight, JointType.FootRight);
+
+
+
+            // Render Joints
+            foreach (MyJoint joint in frame.Joints)
+            {
+                Brush drawBrush = this.trackedJointBrush;
+                drawingContext.DrawEllipse(drawBrush, null, this.SkeletonPointToScreen(ChangeCoordinate(joint.transform)), JointThickness, JointThickness);
+            }
+        }
+
+        private void SampleData2_Click(object sender, RoutedEventArgs e)
+        {
+            stopReplayLoop = false;
+            isPlayingSampleData = true;
+            // Read in file with File class.
+            string text1 = File.ReadAllText("Sample2.txt");
+            List<FrameData> frames = JsonConvert.DeserializeObject<List<FrameData>>(text1);
+            replay(frames, 30, 5);
+        }
+
+        private void SampleData3_Click(object sender, RoutedEventArgs e)
+        {
+            stopReplayLoop = false;
+            isPlayingSampleData = true;
+            // Read in file with File class.
+            string text1 = File.ReadAllText("Sample3.txt");
+            List<FrameData> frames = JsonConvert.DeserializeObject<List<FrameData>>(text1);
+            replay(frames, 30, 5);
+        }
+
+        private void SampleButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (SampleButton.Content.ToString() == "Record")
+            {
+                isRecording = true;
+                SampleButton.Content = "Stop";
+            }
+            else
+            {
+                isRecording = false;
+                SampleButton.Content = "Record";
+                StatusBar.Content = "Saving";
+                //save data to file
+                string recordJson = JsonConvert.SerializeObject(skeletonCollection , Formatting.Indented);
+                using (FileStream fs1 = new FileStream("RecordData.txt", FileMode.Create,FileAccess.Write))
+                using (StreamWriter writer = new StreamWriter(fs1))
+                {
+                    writer.Write(recordJson);
+                }
+
+                skeletonCollection.Clear();
+                StatusBar.Content = "Saved!";
+            }
+        }
+
+        private void StopReplay_Click(object sender, RoutedEventArgs e)
+        {
+            stopReplayLoop = true;
+            isPlayingSampleData = false;
+        }
+
+        private void CheckBox_Checked(object sender, RoutedEventArgs e)
+        {
+            if (connectedToServer)
+            {
+                canSendData = true;
+            }
+        }
+
+        private void CheckBox_Unchecked(object sender, RoutedEventArgs e)
+        {
+            canSendData = false;
+        }
+
+        private void ConnectButton_Click(object sender, RoutedEventArgs e)
+        {
+            // instantiate kafka sender class
+            kafkaSender = new KafkaSender();
+            connectedToServer = kafkaSender.getStatus();
+        }
+
+        private void NewUserButton_Click(object sender, RoutedEventArgs e)
+        {
+            NewUser();
+        }
+
     }
 }

@@ -18,13 +18,27 @@ namespace KinectSkeletonDetectionClient
         private KafkaOptions options;
         private BrokerRouter router;
         private Producer client;
+        private bool isConnected;
 
 
         public KafkaSender()
         {
-            options = new KafkaOptions(new Uri(KAFKA_SERVER_ADDRESS));
-            router = new BrokerRouter(options);
-            client = new Producer(router);
+            try
+            {
+                options = new KafkaOptions(new Uri(KAFKA_SERVER_ADDRESS));
+                router = new BrokerRouter(options);
+                client = new Producer(router);
+                isConnected = true;
+            }
+            catch(Exception e)
+            {
+                isConnected = false;
+            }
+        }
+
+        public bool getStatus()
+        {
+            return isConnected;
         }
 
         public void sendMessage(string _message)

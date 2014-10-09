@@ -34,5 +34,20 @@ namespace KinectSkeletonDetectionClient
             Joints.Add(_joint);
         }
 
+        /// <summary>
+        /// gets transform by joint name
+        /// </summary>
+        public Transform getTransformByJointame(Microsoft.Kinect.JointType jointname)
+        {
+            foreach (MyJoint joint in Joints)
+            {
+                if (joint.jointName == jointname.ToString())
+                {
+                    return joint.transform;
+                }
+            }
+            return null;
+        }
+
     }
 }
